@@ -3,6 +3,15 @@
 
 # Program: DNS Domain Expiration Checker from ak545
 #
+# Modified by Warshtranker:
+# Modification date: 2026-07-02
+# Modification version: 1.0
+# Modifications list:
+#   2026-07-02 - added parameter -o allwing saving report (including valid domains) to a file
+#              - fixed timestamps
+#
+# Original text:
+#
 # Author of the original script: Matty < matty91 at gmail dot com >
 # https://github.com/Matty9191
 #
@@ -319,6 +328,270 @@ G_TOTAL_COST_EXPIRE: int = 0
 
 # Error Domains
 G_DOMAINS_ERROR: int = 0
+
+def save_results_to_file(filename: str = None) -> None:
+    """
+    Save ALL domain check results to a file with timestamp
+    Includes: Expiring, Soon, Valid, Free, Errors, and WhoIS changes
+    :param filename: str - custom filename (optional)
+    :return: None
+    """
+    global EXPIRES_DOMAIN, SOON_DOMAIN, ERRORS_DOMAIN
+    global ERRORS2_DOMAIN, FREE_DOMAINS, WHOIS_TEXT_CHANGED_DOMAIN
+    global G_DOMAINS_TOTAL, G_DOMAINS_VALID, G_DOMAINS_SOON
+    global G_DOMAINS_EXPIRE, G_DOMAINS_ERROR, G_DOMAINS_FREE
+    global G_TOTAL_COST_SOON, G_TOTAL_COST_EXPIRE, G_DOMAINS_LIST
+
+    # Create reports folder if it doesn't exist
+    report_path = pathname + SEP + 'reports' + SEP
+    try:
+        Path(report_path).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f'{FLR}Error creating reports folder: {str(e)}')
+        return
+
+    # Generate filename with timestamp
+    if filename is None or filename == 'auto':
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"domain_report_{timestamp}.txt"
+    
+    full_path = report_path + filename
+    
+    # Initialize report content
+    lines = []
+    hl = f'{"=" * 80}'
+    hl2 = f'{"-" * 80}'
+    today = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    
+    # ===== HEADER =====
+    lines.append(hl)
+    lines.append(f'  DNS DOMAIN EXPIRATION REPORT')
+    lines.append(f'  Generated: {today}')
+    lines.append(hl)
+    lines.append('')
+    lines.append(f'  Total domains processed: {G_DOMAINS_TOTAL}')
+    lines.append(f'  Command: {" ".join(sys.argv)}')
+    lines.append(hl2)
+    lines.append('')
+    
+    # ===== COLLECT ALL DOMAINS FROM G_DOMAINS_LIST =====
+    # Create a dictionary to store all domains with their statuses
+    all_domains = {}
+    
+    # 1. Expiring domains
+    for group, list_of_dict_data in EXPIRES_DOMAIN.items():
+        for item_dict_data in list_of_dict_data:
+            for domain, day_left in item_dict_data.items():
+                all_domains[domain] = {
+                    'status': 'EXPIRING',
+                    'days_left': day_left,
+                    'group': group
+                }
+    
+    # 2. Soon expiring domains
+    for group, list_of_dict_data in SOON_DOMAIN.items():
+        for item_dict_data in list_of_dict_data:
+            for domain, day_left in item_dict_data.items():
+                all_domains[domain] = {
+                    'status': 'SOON',
+                    'days_left': day_left,
+                    'group': group
+                }
+    
+    # 3. Free domains
+    for group, list_of_domains in FREE_DOMAINS.items():
+        for domain in list_of_domains:
+            all_domains[domain] = {
+                'status': 'FREE',
+                'days_left': 'N/A',
+                'group': group
+            }
+    
+    # 4. Error domains
+    for group, list_of_domains in ERRORS_DOMAIN.items():
+        for domain in list_of_domains:
+            all_domains[domain] = {
+                'status': 'ERROR',
+                'days_left': 'ERROR',
+                'group': group
+            }
+    
+    # 5. Rate limited domains
+    for group, list_of_domains in ERRORS2_DOMAIN.items():
+        for domain in list_of_domains:
+            all_domains[domain] = {
+                'status': 'RATE_LIMITED',
+                'days_left': 'LIMIT',
+                'group': group
+            }
+    
+    # 6. VALID domains - get them from G_DOMAINS_LIST
+    #    (domains that are not in any of the lists above)
+    for item in G_DOMAINS_LIST:
+        domain = item.get('domain', '').strip()
+        if domain and domain not in all_domains:
+            # This is a valid domain
+            group = item.get('group', '/')
+            if group == '':
+                group = '/'
+            all_domains[domain] = {
+                'status': 'VALID',
+                'days_left': '> ' + str(CLI.expire_days),
+                'group': group
+            }
+    
+    # If no domains found - exit
+    if len(all_domains) == 0:
+        if CLI.print_to_console:
+            print(f'{FLY}No domains to report.{FR}')
+        return
+    
+    # ===== GROUP BY STATUS =====
+    status_order = ['EXPIRING', 'SOON', 'VALID', 'FREE', 'ERROR', 'RATE_LIMITED']
+    status_labels = {
+        'EXPIRING': '🔴 EXPIRING - Immediate attention required!',
+        'SOON': '🟡 SOON - Expiring within threshold',
+        'VALID': '🟢 VALID - Safe',
+        'FREE': '🔵 FREE - Available for registration',
+        'ERROR': '⚫ ERROR - Failed to check',
+        'RATE_LIMITED': '⚪ RATE LIMITED - WhoIS limit exceeded'
+    }
+    
+    # Count domains by status
+    total_by_status = {}
+    for status in status_order:
+        total_by_status[status] = 0
+    
+    # Process each status category
+    for status in status_order:
+        # Collect domains with this status
+        status_domains = {}
+        for domain, info in all_domains.items():
+            if info['status'] == status:
+                group = info.get('group', '/')
+                if group not in status_domains:
+                    status_domains[group] = []
+                status_domains[group].append((domain, info))
+                total_by_status[status] += 1
+        
+        if len(status_domains) > 0:
+            # Status header
+            lines.append('')
+            lines.append(f'[{status_labels[status]}]')
+            lines.append(f'  Count: {total_by_status[status]}')
+            lines.append(hl2)
+            
+            # Group by group
+            group_counter = 0
+            for group, domains in status_domains.items():
+                group_counter += 1
+                if group != '/':
+                    lines.append(f'')
+                    lines.append(f'  Group #{group_counter}: {group}')
+                    lines.append(f'  {hl2}')
+                
+                # Sort domains alphabetically
+                domains_sorted = sorted(domains, key=lambda x: x[0])
+                
+                for domain, info in domains_sorted:
+                    if status in ['EXPIRING', 'SOON']:
+                        days = info.get('days_left', 'N/A')
+                        lines.append(f'    {domain:<45} {days:>6} days left')
+                    elif status == 'VALID':
+                        days = info.get('days_left', '> ' + str(CLI.expire_days))
+                        lines.append(f'    {domain:<45} {days:>6}')
+                    else:
+                        lines.append(f'    {domain}')
+            
+            lines.append('')
+    
+    # ===== WHOIS TEXT CHANGES (if any) =====
+    if len(WHOIS_TEXT_CHANGED_DOMAIN) > 0:
+        lines.append('')
+        lines.append('[📝 WHOIS TEXT CHANGED] - Domain whois text has changed since last check')
+        lines.append(hl2)
+        
+        group_counter = 0
+        for group, list_of_dict_data in WHOIS_TEXT_CHANGED_DOMAIN.items():
+            group_counter += 1
+            if group != '/':
+                lines.append(f'')
+                lines.append(f'  Group #{group_counter}: {group}')
+                lines.append(f'  {hl2}')
+            
+            for item_dict_data in list_of_dict_data:
+                for domain, value in item_dict_data.items():
+                    dt = value.get('dt', 'N/A')
+                    txt = value.get('txt', '')
+                    lines.append(f'')
+                    lines.append(f'    Domain: {domain}')
+                    lines.append(f'    Changed: {dt}')
+                    lines.append(f'    {hl2}')
+                    # Truncate long text to keep file manageable
+                    if len(txt) > 500:
+                        lines.append(f'    {txt[:500]}...')
+                        lines.append(f'    [Truncated, total length: {len(txt)} chars]')
+                    else:
+                        for line in txt.splitlines():
+                            if line.strip():
+                                lines.append(f'    {line}')
+                    lines.append('')
+    
+    # ===== COST SUMMARY =====
+    g_total_cost = G_TOTAL_COST_SOON + G_TOTAL_COST_EXPIRE
+    if g_total_cost > 0:
+        lines.append('')
+        lines.append('[💰 COST SUMMARY]')
+        lines.append(hl2)
+        if G_TOTAL_COST_EXPIRE > 0:
+            lines.append(f'  Expiring domains  : {G_CURRENCY_SYMBOL} {round(G_TOTAL_COST_EXPIRE, 2)} ({G_DOMAINS_EXPIRE} domains)')
+        if G_TOTAL_COST_SOON > 0:
+            lines.append(f'  Soon domains      : {G_CURRENCY_SYMBOL} {round(G_TOTAL_COST_SOON, 2)} ({G_DOMAINS_SOON} domains)')
+        lines.append(hl2)
+        lines.append(f'  TOTAL COST        : {G_CURRENCY_SYMBOL} {round(g_total_cost, 2)}')
+    
+    # ===== FINAL SUMMARY =====
+    lines.append('')
+    lines.append(hl)
+    lines.append('  FINAL SUMMARY')
+    lines.append(hl)
+    lines.append(f'    Total Domains   : {G_DOMAINS_TOTAL}')
+    
+    # Display counts for each status
+    for status in status_order:
+        if total_by_status.get(status, 0) > 0:
+            label = status.capitalize()
+            count = total_by_status[status]
+            # Add emoji based on status
+            emoji_map = {
+                'EXPIRING': '🔴',
+                'SOON': '🟡',
+                'VALID': '🟢',
+                'FREE': '🔵',
+                'ERROR': '⚫',
+                'RATE_LIMITED': '⚪'
+            }
+            emoji = emoji_map.get(status, '')
+            lines.append(f'    {emoji} {label:<12}: {count}')
+    
+    lines.append(hl2)
+    if g_total_cost > 0:
+        lines.append(f'    Total Cost      : {G_CURRENCY_SYMBOL} {round(g_total_cost, 2)}')
+    lines.append(hl)
+    lines.append('')
+    lines.append(f'  Report saved to: {full_path}')
+    lines.append(hl)
+    
+    # ===== WRITE TO FILE =====
+    try:
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
+        if CLI.print_to_console:
+            print(f'\n{FLG}Report saved to: {FLC}{full_path}{FR}')
+            
+    except Exception as e:
+        print(f'{FLR}Error saving report: {str(e)}')
 
 
 def remove_control_characters_of_colorama(text: str) -> str:
@@ -793,8 +1066,10 @@ def calculate_expiration_days(expiration_date: datetime) -> int:
     :return: int
     """
     try:
-        domain_expire = expiration_date - datetime.now()
+        from datetime import datetime, timezone
+        domain_expire = expiration_date - datetime.now(timezone.utc)
     except Exception as e:
+        
         print(f'{FLR}Unable to calculate the expiration days.\nError: {str(e)}')
         sys.exit(-1)
 
@@ -1640,6 +1915,7 @@ def process_cli():
         a file with a list of domains etc.
     :return: dict
     """
+    
     process_parser = MyParser(
         formatter_class=argparse.RawTextHelpFormatter,
         conflict_handler='resolve',
@@ -1821,6 +2097,15 @@ def process_cli():
         default=False,
         help='Do not print banner (default is False)'
     )
+    parent_group.add_argument(
+        '-o',
+        '--output',
+        nargs='?',
+        const='auto',
+        default=None,
+        help='Save results to a file with timestamp (default: domain_report_YYYY-MM-DD_HH-MM-SS.txt)',
+        metavar='FILENAME'
+    )
     return process_parser
 
 
@@ -1861,7 +2146,8 @@ def print_namespase() -> None:
         f'\tUse only external whois  : {CLI.use_only_external_whois}\n'
         f'\tUse extra external whois : {CLI.use_extra_external_whois}\n'
         f'\tWhois command timeout    : {WHOIS_COMMAND_TIMEOUT}\n'
-        f'\tPrint banner             : {not CLI.no_banner}\n'
+        f'\tPrint banner             : {not CLI.no_banner}\n'        
+        f'\tSave to file             : {CLI.output if CLI.output is not None else "Disabled"}\n'
         f'\t-------------------------'
     )
 
@@ -2928,12 +3214,16 @@ def check_cli_logic() -> None:
     if CLI.print_to_console:
         print_heading()
 
+from datetime import datetime
 
 def main() -> None:
     """
     Main function
     :return: None
     """
+
+    
+
     global EXPIRES_DOMAIN
     global SOON_DOMAIN
     global ERRORS_DOMAIN
@@ -3100,6 +3390,13 @@ def main() -> None:
         if CLI.use_telegram:
             make_report_for_telegram()
 
+    # SAVE TO FILE
+    if CLI.output is not None:
+        if CLI.output == 'auto':
+            save_results_to_file()
+        else:
+            save_results_to_file(CLI.output)  
+
 
 if __name__ == '__main__':
     # Parsing command line
@@ -3107,4 +3404,7 @@ if __name__ == '__main__':
     CLI = parser.parse_args(sys.argv[1:])
     if len(sys.argv[1:]) == 0:
         parser.print_help()
+
+    print(datetime.now(), "Launch checking.")
+
     main()
